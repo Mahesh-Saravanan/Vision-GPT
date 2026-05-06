@@ -42,6 +42,11 @@ CFG = dict(
     num_workers  = 4,
     checkpoint_dir = "checkpoints",
     plot_path      = "training_curves.png",
+
+    # --- Dataset paths (Karpathy split format) ---
+    # Download instructions are printed by dataloader.py if the file is missing.
+    karpathy_json = "dataset_flickr30k.json",   # path to Karpathy split JSON
+    image_root    = ".",                         # directory containing flickr30k-images/
 )
 
 
@@ -149,13 +154,21 @@ def train():
     # Data
     print("\nBuilding dataloaders …")
     train_loader = get_dataloader(
-        "train", batch_size=CFG["batch_size"],
-        num_workers=CFG["num_workers"], max_length=CFG["max_length"],
+        "train",
+        karpathy_json=CFG["karpathy_json"],
+        image_root=CFG["image_root"],
+        batch_size=CFG["batch_size"],
+        num_workers=CFG["num_workers"],
+        max_length=CFG["max_length"],
         tokenizer=tokenizer,
     )
     val_loader = get_dataloader(
-        "val", batch_size=CFG["batch_size"],
-        num_workers=CFG["num_workers"], max_length=CFG["max_length"],
+        "val",
+        karpathy_json=CFG["karpathy_json"],
+        image_root=CFG["image_root"],
+        batch_size=CFG["batch_size"],
+        num_workers=CFG["num_workers"],
+        max_length=CFG["max_length"],
         tokenizer=tokenizer,
     )
 
