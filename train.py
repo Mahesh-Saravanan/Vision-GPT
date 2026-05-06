@@ -29,12 +29,28 @@ from utils import save_checkpoint, plot_training_curves
 # Training config  – edit these before running
 # ---------------------------------------------------------------------------
 CFG = dict(
-    vit_model    = "google/vit-base-patch16-224",
-    gpt2_model   = "gpt2",           # swap "gpt2-medium" for 1024-dim decoder
-    freeze_vit   = True,             # keep ViT frozen; set False to fine-tune end-to-end
+    # --- ViT Encoder (matches ViT-Base/16) ---
+    image_size  = 224,
+    patch_size  = 16,
+    vit_dim     = 768,
+    vit_depth   = 12,
+    vit_heads   = 12,
+
+    # --- GPT-2 Decoder (matches GPT-2 Base) ---
+    vocab_size  = 50257,
+    gpt2_dim    = 768,
+    gpt2_depth  = 12,
+    gpt2_heads  = 12,
+    max_seq_len = 256,
+
+    # --- Shared ---
+    mlp_ratio   = 4.0,
+    dropout     = 0.1,
+
+    # --- Training ---
     epochs       = 20,
-    batch_size   = 32,               # reduce to 16 if OOM
-    max_length   = 64,               # max caption token length
+    batch_size   = 32,        # reduce to 16 if OOM
+    max_length   = 64,        # max tokenised caption length
     lr           = 3e-4,
     weight_decay = 0.01,
     warmup_steps = 500,
@@ -44,11 +60,10 @@ CFG = dict(
     plot_path      = "training_curves.png",
 
     # --- Dataset ---
-    # None  → auto-detects Data/ folder next to train.py, or falls back to Hub.
-    # Set to a path string to point at a different folder explicitly.
+    # None → auto-detects Data/ folder next to train.py, or falls back to Hub.
     data_dir  = None,
-    val_size  = 1000,    # images held out for validation
-    test_size = 1000,    # images held out for testing
+    val_size  = 1000,
+    test_size = 1000,
 )
 
 
@@ -150,7 +165,7 @@ def train():
     os.makedirs(CFG["checkpoint_dir"], exist_ok=True)
 
     # Tokeniser (shared between dataloader and model.generate)
-    tokenizer = GPT2Tokenizer.from_pretrained(CFG["gpt2_model"])
+    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
 
     # Data
@@ -170,9 +185,18 @@ def train():
     # Model
     print("\nInitialising VisionGPT2Model …")
     model = VisionGPT2Model(
-        vit_model_name=CFG["vit_model"],
-        gpt2_model_name=CFG["gpt2_model"],
-        freeze_vit=CFG["freeze_vit"],
+        image_size=CFG["image_size"],
+        patch_size=CFG["patch_size"],
+        vit_dim=CFG["vit_dim"],
+        vit_depth=CFG["vit_depth"],
+        vit_heads=CFG["vit_heads"],
+        vocab_size=CFG["vocab_size"],
+        gpt2_dim=CFG["gpt2_dim"],
+        gpt2_depth=CFG["gpt2_depth"],
+        gpt2_heads=CFG["gpt2_heads"],
+        max_seq_len=CFG["max_seq_len"],
+        mlp_ratio=CFG["mlp_ratio"],
+        dropout=CFG["dropout"],
     ).to(device)
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
