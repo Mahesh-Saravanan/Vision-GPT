@@ -163,6 +163,7 @@ def train():
         num_workers=CFG["num_workers"],
         max_length=CFG["max_length"],
         tokenizer=tokenizer,
+        # extract_dir="~/.cache/flickr30k"  # override if needed
     )
     train_loader = get_dataloader("train", **loader_kwargs)
     val_loader   = get_dataloader("val",   **loader_kwargs)
