@@ -43,10 +43,13 @@ CFG = dict(
     checkpoint_dir = "checkpoints",
     plot_path      = "training_curves.png",
 
-    # --- Dataset paths (Karpathy split format) ---
-    # Download instructions are printed by dataloader.py if the file is missing.
-    karpathy_json = "dataset_flickr30k.json",   # path to Karpathy split JSON
-    image_root    = ".",                         # directory containing flickr30k-images/
+    # --- Dataset paths (optional) ---
+    # Leave both as None to auto-fetch from HuggingFace Hub (no local files needed).
+    # Set both to use local Karpathy-split files (faster after first download):
+    #   karpathy_json = "/data/flickr30k/dataset_flickr30k.json"
+    #   image_root    = "/data/flickr30k"
+    karpathy_json = None,
+    image_root    = None,
 )
 
 
@@ -153,8 +156,7 @@ def train():
 
     # Data
     print("\nBuilding dataloaders …")
-    train_loader = get_dataloader(
-        "train",
+    loader_kwargs = dict(
         karpathy_json=CFG["karpathy_json"],
         image_root=CFG["image_root"],
         batch_size=CFG["batch_size"],
@@ -162,15 +164,8 @@ def train():
         max_length=CFG["max_length"],
         tokenizer=tokenizer,
     )
-    val_loader = get_dataloader(
-        "val",
-        karpathy_json=CFG["karpathy_json"],
-        image_root=CFG["image_root"],
-        batch_size=CFG["batch_size"],
-        num_workers=CFG["num_workers"],
-        max_length=CFG["max_length"],
-        tokenizer=tokenizer,
-    )
+    train_loader = get_dataloader("train", **loader_kwargs)
+    val_loader   = get_dataloader("val",   **loader_kwargs)
 
     # Model
     print("\nInitialising VisionGPT2Model …")
