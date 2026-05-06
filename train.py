@@ -43,13 +43,12 @@ CFG = dict(
     checkpoint_dir = "checkpoints",
     plot_path      = "training_curves.png",
 
-    # --- Dataset paths (optional) ---
-    # Leave both as None to auto-fetch from HuggingFace Hub (no local files needed).
-    # Set both to use local Karpathy-split files (faster after first download):
-    #   karpathy_json = "/data/flickr30k/dataset_flickr30k.json"
-    #   image_root    = "/data/flickr30k"
-    karpathy_json = None,
-    image_root    = None,
+    # --- Dataset ---
+    # None  → auto-detects Data/ folder next to train.py, or falls back to Hub.
+    # Set to a path string to point at a different folder explicitly.
+    data_dir  = None,
+    val_size  = 1000,    # images held out for validation
+    test_size = 1000,    # images held out for testing
 )
 
 
@@ -157,13 +156,13 @@ def train():
     # Data
     print("\nBuilding dataloaders …")
     loader_kwargs = dict(
-        karpathy_json=CFG["karpathy_json"],
-        image_root=CFG["image_root"],
+        data_dir=CFG["data_dir"],
+        val_size=CFG["val_size"],
+        test_size=CFG["test_size"],
         batch_size=CFG["batch_size"],
         num_workers=CFG["num_workers"],
         max_length=CFG["max_length"],
         tokenizer=tokenizer,
-        # extract_dir="~/.cache/flickr30k"  # override if needed
     )
     train_loader = get_dataloader("train", **loader_kwargs)
     val_loader   = get_dataloader("val",   **loader_kwargs)

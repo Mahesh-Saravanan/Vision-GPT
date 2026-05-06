@@ -1,3 +1,15 @@
+# Dataset — keep images and captions local, not in git
+Data/
+
+# Model checkpoints and training artefacts
+checkpoints/
+training_curves.png
+*.pt
+*.pth
+
+# HuggingFace local cache (if stored inside repo)
+.cache/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

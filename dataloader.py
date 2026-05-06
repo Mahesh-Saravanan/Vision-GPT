@@ -1,37 +1,39 @@
 """
 Flickr30k DataLoader for VisionGPT2.
 
-No dependency on the `datasets` library.
-Uses huggingface_hub + stdlib (csv, zipfile, ast) only.
+Supported data sources (tried in this order):
+  1. Local folder  — fastest; used automatically when Data/ exists next to train.py
+  2. HuggingFace Hub — downloads on first run, cached to ~/.cache/flickr30k/
 
-CSV schema of flickr_annotations_30k.csv (confirmed from repo):
-    raw       – JSON-encoded list of 5 caption strings
-    sentids   – JSON-encoded list of sentence IDs
-    split     – "train" | "val" | "test"  (split already in the file)
-    filename  – image filename, e.g. "1000092795.jpg"
-    img_id    – integer image ID
+LOCAL FORMAT (Data/)
+--------------------
+  Data/
+  ├── Images/
+  │   ├── 000092795.jpg
+  │   ├── 10002456.jpg
+  │   └── ...
+  └── captions.txt          one line per caption:
+                             000092795.jpg, Two friends enjoy time spent together .
+                             10002456.jpg, Several men in hard hats are operating ...
+                             10002456.jpg, Workers look down from up above ...
 
-First-run behaviour
--------------------
-  1. flickr_annotations_30k.csv  (~5 MB)  → downloaded to HF cache
-  2. flickr30k-images.zip        (~9 GB)  → downloaded to HF cache, then
-                                             extracted once to ~/.cache/flickr30k/
-  Both are cached permanently; subsequent runs skip all downloads.
+Since captions.txt has no split column, a deterministic split is created
+from the sorted list of unique image filenames:
+  train  — first  (N - val_size - test_size) unique images
+  val    — next   val_size  images  (default 1 000)
+  test   — last   test_size images  (default 1 000)
 
-Memory design
--------------
-  self.samples stores (image_path, caption) strings only.
-  PIL images are opened on demand inside __getitem__ — no images in RAM
-  at dataset construction time.
+GPT-2 TOKENISATION
+------------------
+  pad_token = eos_token  (<|endoftext|>, id 50 256)
+  EOS appended to every caption; padding positions → label -100
 """
 
 import os
+import csv
 import io
 import ast
-import csv
-import json
 import zipfile
-import urllib.request
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -43,7 +45,12 @@ from PIL import Image
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 
-# Where extracted images are cached locally
+# Default local data directory (relative to wherever train.py is run from)
+_DEFAULT_DATA_DIR   = "Data"
+_DEFAULT_IMAGES_DIR = os.path.join(_DEFAULT_DATA_DIR, "Images")
+_DEFAULT_CAPTIONS   = os.path.join(_DEFAULT_DATA_DIR, "captions.txt")
+
+# Hub extraction cache
 _DEFAULT_EXTRACT_DIR = os.path.join(os.path.expanduser("~"), ".cache", "flickr30k")
 
 
@@ -55,21 +62,91 @@ def get_image_transform(image_size: int = 224) -> transforms.Compose:
     ])
 
 
-# ---------------------------------------------------------------------------
-# Hub loader — downloads CSV + ZIP, extracts once, returns list of
-# {'image_path': str, 'caption': str} dicts
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
+# Strategy 1  —  local Data/ folder
+# -----------------------------------------------------------------------
+
+def _load_from_local_folder(
+    split:      str,
+    data_dir:   str = _DEFAULT_DATA_DIR,
+    val_size:   int = 1000,
+    test_size:  int = 1000,
+) -> list:
+    """
+    Parses Data/captions.txt and Data/Images/.
+
+    captions.txt format  (one caption per line, comma after filename):
+        000092795.jpg, Two friends enjoy time spent together .
+        10002456.jpg,  Several men in hard hats are operating a giant pulley system .
+
+    Returns a flat list of {'image_path': str, 'caption': str}.
+    """
+    captions_path = os.path.join(data_dir, "captions.txt")
+    images_dir    = os.path.join(data_dir, "Images")
+
+    if not os.path.isfile(captions_path):
+        raise FileNotFoundError(f"captions.txt not found at: {captions_path}")
+    if not os.path.isdir(images_dir):
+        raise FileNotFoundError(f"Images directory not found at: {images_dir}")
+
+    # --- Parse captions ---
+    # Use split(", ", 1) so commas inside caption text are preserved.
+    image_captions: dict = {}
+    with open(captions_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            # Split only on the first ", " to preserve commas in captions
+            if ", " in line:
+                filename, caption = line.split(", ", 1)
+            elif "," in line:
+                filename, caption = line.split(",", 1)
+            else:
+                continue
+            filename = filename.strip()
+            caption  = caption.strip()
+            image_captions.setdefault(filename, []).append(caption)
+
+    # --- Deterministic train/val/test split on sorted filenames ---
+    all_images = sorted(image_captions.keys())
+    n          = len(all_images)
+
+    if n < val_size + test_size:
+        raise ValueError(
+            f"Only {n} unique images found, but val_size+test_size="
+            f"{val_size + test_size}.  Reduce val_size / test_size."
+        )
+
+    # Sorted order: first (n - val - test) → train, then val, then test
+    train_set = set(all_images[:n - val_size - test_size])
+    val_set   = set(all_images[n - val_size - test_size : n - test_size])
+    test_set  = set(all_images[n - test_size:])
+    target    = {"train": train_set, "val": val_set, "test": test_set}[split]
+
+    samples = []
+    for filename in all_images:
+        if filename not in target:
+            continue
+        img_path = os.path.join(images_dir, filename)
+        if not os.path.isfile(img_path):
+            raise FileNotFoundError(
+                f"Image listed in captions.txt not found on disk: {img_path}"
+            )
+        for caption in image_captions[filename]:
+            samples.append({"image_path": img_path, "caption": caption})
+
+    return samples
+
+
+# -----------------------------------------------------------------------
+# Strategy 2  —  HuggingFace Hub (nlphuji/flickr30k)
+# -----------------------------------------------------------------------
 
 def _ensure_images_extracted(extract_dir: str) -> str:
-    """
-    Returns the path to the extracted flickr30k-images/ directory.
-    Downloads and extracts flickr30k-images.zip on first call.
-    """
     from huggingface_hub import hf_hub_download
 
     images_dir = os.path.join(extract_dir, "flickr30k-images")
-
-    # Check if already extracted (needs at least 31 000 image files)
     if os.path.isdir(images_dir) and len(os.listdir(images_dir)) >= 31000:
         return images_dir
 
@@ -79,38 +156,25 @@ def _ensure_images_extracted(extract_dir: str) -> str:
         filename="flickr30k-images.zip",
         repo_type="dataset",
     )
-
     os.makedirs(extract_dir, exist_ok=True)
     print(f"  Extracting to {extract_dir} …")
     with zipfile.ZipFile(zip_cached, "r") as zf:
         zf.extractall(extract_dir)
-
-    print(f"  Extraction complete → {images_dir}")
+    print(f"  Done → {images_dir}")
     return images_dir
 
 
 def _load_from_hub(split: str, extract_dir: str = _DEFAULT_EXTRACT_DIR) -> list:
-    """
-    Downloads flickr_annotations_30k.csv and flickr30k-images.zip from
-    nlphuji/flickr30k via hf_hub_download (no `datasets` library needed),
-    then returns a flat list of {'image_path': str, 'caption': str} dicts.
-    """
     from huggingface_hub import hf_hub_download
 
-    # --- Step 1: annotations CSV (small, fast) ---
     print("  Downloading flickr_annotations_30k.csv …")
-    csv_path = hf_hub_download(
+    csv_path   = hf_hub_download(
         repo_id="nlphuji/flickr30k",
         filename="flickr_annotations_30k.csv",
         repo_type="dataset",
     )
-
-    # --- Step 2: images ZIP (large, extracted once) ---
     images_dir = _ensure_images_extracted(extract_dir)
 
-    # --- Step 3: parse CSV and build sample list ---
-    # raw column: JSON list of 5 caption strings, e.g.
-    #   '["Two dogs play.", "A dog runs.", ...]'
     samples = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -118,79 +182,40 @@ def _load_from_hub(split: str, extract_dir: str = _DEFAULT_EXTRACT_DIR) -> list:
             if row["split"] != split:
                 continue
             img_path = os.path.join(images_dir, row["filename"])
-            captions = ast.literal_eval(row["raw"])   # list of 5 strings
-            for cap in captions:
-                samples.append({
-                    "image_path": img_path,
-                    "caption":    str(cap).strip(),
-                })
+            for cap in ast.literal_eval(row["raw"]):
+                samples.append({"image_path": img_path, "caption": str(cap).strip()})
 
     return samples
 
 
-# ---------------------------------------------------------------------------
-# Local Karpathy loader (optional, faster if you already have the files)
-# ---------------------------------------------------------------------------
-
-def _load_from_local(split: str, karpathy_json: str, image_root: str) -> list:
-    """
-    Reads dataset_flickr30k.json (Karpathy split) + local image directory.
-    Returns list of {'image_path': str, 'caption': str}.
-    """
-    with open(karpathy_json, encoding="utf-8") as f:
-        data = json.load(f)
-
-    samples = []
-    for entry in data["images"]:
-        if entry["split"] != split:
-            continue
-        img_path = os.path.join(
-            image_root,
-            entry.get("filepath", "flickr30k-images"),
-            entry["filename"],
-        )
-        if not os.path.isfile(img_path):
-            raise FileNotFoundError(
-                f"Image not found: {img_path}\n"
-                "Make sure image_root contains a 'flickr30k-images/' subdirectory."
-            )
-        for sentence in entry["sentences"]:
-            samples.append({
-                "image_path": img_path,
-                "caption":    sentence["raw"].strip(),
-            })
-
-    return samples
-
-
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # Dataset
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 
 class Flickr30kDataset(Dataset):
     """
-    Flickr30k dataset. Images are loaded from disk on demand — no images
-    held in RAM during construction.
-
     Args:
-        split          : 'train', 'val', or 'test'
-        karpathy_json  : path to dataset_flickr30k.json  (activates local mode)
-        image_root     : directory containing flickr30k-images/  (local mode)
-        extract_dir    : where to extract the Hub ZIP (default ~/.cache/flickr30k)
-        max_length     : max tokenised caption length
-        image_size     : ViT input resolution (default 224)
-        tokenizer      : GPT2Tokenizer; built from 'gpt2' if None
+        split       : 'train', 'val', or 'test'
+        data_dir    : path to folder containing Images/ and captions.txt
+                      (auto-detected as 'Data/' if it exists)
+        val_size    : images reserved for validation  (local mode only)
+        test_size   : images reserved for testing     (local mode only)
+        extract_dir : where to extract Hub ZIP        (Hub mode only)
+        max_length  : max tokenised caption length
+        image_size  : ViT input resolution
+        tokenizer   : GPT2Tokenizer; built from 'gpt2' if None
     """
 
     def __init__(
         self,
-        split:         str = "train",
-        karpathy_json: str = None,
-        image_root:    str = None,
-        extract_dir:   str = _DEFAULT_EXTRACT_DIR,
-        max_length:    int = 64,
-        image_size:    int = 224,
-        tokenizer          = None,
+        split:       str  = "train",
+        data_dir:    str  = None,
+        val_size:    int  = 1000,
+        test_size:   int  = 1000,
+        extract_dir: str  = _DEFAULT_EXTRACT_DIR,
+        max_length:  int  = 64,
+        image_size:  int  = 224,
+        tokenizer         = None,
     ):
         self.max_length = max_length
         self.transform  = get_image_transform(image_size)
@@ -200,15 +225,15 @@ class Flickr30kDataset(Dataset):
         tokenizer.pad_token = tokenizer.eos_token
         self.tokenizer = tokenizer
 
-        use_local = (
-            karpathy_json is not None
-            and os.path.isfile(karpathy_json)
-            and image_root is not None
-        )
+        # Auto-detect local Data/ folder
+        if data_dir is None and os.path.isdir(_DEFAULT_DATA_DIR):
+            data_dir = _DEFAULT_DATA_DIR
 
-        if use_local:
-            print(f"Loading Flickr30k ({split}) from local Karpathy JSON …")
-            self.samples = _load_from_local(split, karpathy_json, image_root)
+        if data_dir is not None:
+            print(f"Loading Flickr30k ({split}) from local folder: {data_dir} …")
+            self.samples = _load_from_local_folder(
+                split, data_dir, val_size, test_size
+            )
         else:
             print(f"Loading Flickr30k ({split}) from HuggingFace Hub …")
             self.samples = _load_from_hub(split, extract_dir)
@@ -225,11 +250,9 @@ class Flickr30kDataset(Dataset):
         sample  = self.samples[idx]
         caption = sample["caption"]
 
-        # Load image from disk on demand
         img          = Image.open(sample["image_path"]).convert("RGB")
-        pixel_values = self.transform(img)   # [3, 224, 224]
+        pixel_values = self.transform(img)          # [3, 224, 224]
 
-        # Tokenise: append EOS so model learns to terminate
         text   = caption + self.tokenizer.eos_token
         tokens = self.tokenizer(
             text,
@@ -244,7 +267,7 @@ class Flickr30kDataset(Dataset):
 
         input_ids  = full_ids[:-1].clone()
         target_ids = full_ids[1:].clone()
-        target_ids[full_mask[1:] == 0] = -100   # ignore padding in loss
+        target_ids[full_mask[1:] == 0] = -100      # ignore padding in loss
 
         return {
             "pixel_values": pixel_values,
@@ -253,25 +276,27 @@ class Flickr30kDataset(Dataset):
         }
 
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # DataLoader factory
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 
 def get_dataloader(
-    split:         str = "train",
-    karpathy_json: str = None,
-    image_root:    str = None,
-    extract_dir:   str = _DEFAULT_EXTRACT_DIR,
-    batch_size:    int = 32,
-    num_workers:   int = 4,
-    max_length:    int = 64,
-    image_size:    int = 224,
-    tokenizer          = None,
+    split:       str  = "train",
+    data_dir:    str  = None,
+    val_size:    int  = 1000,
+    test_size:   int  = 1000,
+    extract_dir: str  = _DEFAULT_EXTRACT_DIR,
+    batch_size:  int  = 32,
+    num_workers: int  = 4,
+    max_length:  int  = 64,
+    image_size:  int  = 224,
+    tokenizer         = None,
 ) -> DataLoader:
     ds = Flickr30kDataset(
         split=split,
-        karpathy_json=karpathy_json,
-        image_root=image_root,
+        data_dir=data_dir,
+        val_size=val_size,
+        test_size=test_size,
         extract_dir=extract_dir,
         max_length=max_length,
         image_size=image_size,
@@ -287,14 +312,14 @@ def get_dataloader(
     )
 
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 # Sanity check:  python dataloader.py
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 
 if __name__ == "__main__":
     loader = get_dataloader(split="val", batch_size=4, num_workers=0)
     batch  = next(iter(loader))
-    print("pixel_values:", batch["pixel_values"].shape)   # [4, 3, 224, 224]
-    print("input_ids:   ", batch["input_ids"].shape)      # [4, 64]
-    print("target_ids:  ", batch["target_ids"].shape)     # [4, 64]
+    print("pixel_values :", batch["pixel_values"].shape)   # [4, 3, 224, 224]
+    print("input_ids    :", batch["input_ids"].shape)      # [4, 64]
+    print("target_ids   :", batch["target_ids"].shape)     # [4, 64]
     print("OK")
