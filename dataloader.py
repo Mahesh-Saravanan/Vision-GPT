@@ -30,6 +30,7 @@ GPT-2 TOKENISATION
 """
 
 import os
+import re
 import csv
 import io
 import ast
@@ -90,22 +91,23 @@ def _load_from_local_folder(
         raise FileNotFoundError(f"Images directory not found at: {images_dir}")
 
     # --- Parse captions ---
-    # Use split(", ", 1) so commas inside caption text are preserved.
+    # Use csv.reader so quoted fields (and commas inside captions) are handled
+    # correctly regardless of whether the file uses spaces after commas or not.
+    # e.g. both of these are parsed safely:
+    #   1000092795.jpg, Two friends enjoy time spent together .
+    #   1000092795.jpg,"Two young, White males are outside near many bushes ."
     image_captions: dict = {}
-    with open(captions_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+    with open(captions_path, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) < 2:
                 continue
-            # Split only on the first ", " to preserve commas in captions
-            if ", " in line:
-                filename, caption = line.split(", ", 1)
-            elif "," in line:
-                filename, caption = line.split(",", 1)
-            else:
+            raw_name = row[0].strip()
+            caption  = row[1].strip()
+            if not raw_name or not caption:
                 continue
-            filename = filename.strip()
-            caption  = caption.strip()
+            # Strip optional #index suffix  (e.g. "1000092795.jpg#0" → "1000092795.jpg")
+            filename = re.sub(r"#\d+$", "", raw_name).strip()
             image_captions.setdefault(filename, []).append(caption)
 
     # --- Deterministic train/val/test split on sorted filenames ---
