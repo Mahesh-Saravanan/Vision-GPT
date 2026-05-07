@@ -565,14 +565,17 @@ class VisionGPT2Model(nn.Module):
         enc_out   = self.encode_image(pixel_values.to(device))
         input_ids = torch.tensor([[tokenizer.eos_token_id]], device=device)
 
-        for _ in range(max_new_tokens):
-            logits  = self.decoder(input_ids, enc_out)
-            next_id = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        for step in range(max_new_tokens):
+            logits      = self.decoder(input_ids, enc_out)
+            next_logits = logits[:, -1, :].clone()
+            if step == 0:
+                next_logits[:, tokenizer.eos_token_id] = float("-inf")
+            next_id   = next_logits.argmax(dim=-1, keepdim=True)
             input_ids = torch.cat([input_ids, next_id], dim=1)
             if next_id.item() == tokenizer.eos_token_id:
                 break
 
-        return tokenizer.decode(input_ids[0], skip_special_tokens=True)
+        return tokenizer.decode(input_ids[0][1:], skip_special_tokens=True)
 
     @torch.no_grad()
     def generate_beam_search(
@@ -591,7 +594,7 @@ class VisionGPT2Model(nn.Module):
         beams:     list = [(0.0, [eos_id])]
         completed: list = []
 
-        for _ in range(max_new_tokens):
+        for step in range(max_new_tokens):
             if not beams:
                 break
             candidates = []
@@ -601,8 +604,10 @@ class VisionGPT2Model(nn.Module):
                     continue
                 ids      = torch.tensor([seq], device=device)
                 logits   = self.decoder(ids, enc_out)
-                log_prob = F.log_softmax(logits[:, -1, :], dim=-1)[0]
-                top_lp, top_id = log_prob.topk(beam_size)
+                lp_all   = F.log_softmax(logits[:, -1, :], dim=-1)[0]
+                if step == 0:
+                    lp_all[eos_id] = float("-inf")
+                top_lp, top_id = lp_all.topk(beam_size)
                 for lp, tid in zip(top_lp.tolist(), top_id.tolist()):
                     candidates.append((score + lp, seq + [tid]))
 
@@ -621,4 +626,4 @@ class VisionGPT2Model(nn.Module):
             key=lambda x: x[0] / (len(x[1]) ** length_penalty),
             reverse=True,
         )
-        return tokenizer.decode(completed[0][1], skip_special_tokens=True)
+        return tokenizer.decode(completed[0][1][1:], skip_special_tokens=True)

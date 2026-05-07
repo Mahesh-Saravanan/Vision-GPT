@@ -43,14 +43,13 @@ def preprocess_image(image_path: str, image_size: int = 224) -> torch.Tensor:
 
 def load_model(
     checkpoint_path: str,
-    vit_model:       str = "google/vit-base-patch16-224",
-    gpt2_model:      str = "gpt2",
     device:          str = "cpu",
 ) -> VisionGPT2Model:
     """Build the model, load checkpoint weights, set to eval mode."""
     model = VisionGPT2Model(
-        vit_model_name=vit_model,
-        gpt2_model_name=gpt2_model,
+        image_size=224, patch_size=16, vit_dim=768, vit_depth=12, vit_heads=12,
+        vocab_size=50257, gpt2_dim=768, gpt2_depth=12, gpt2_heads=12,
+        max_seq_len=256, mlp_ratio=4.0, dropout=0.1,
     ).to(device)
     load_checkpoint(model, checkpoint_path, device)
     model.eval()
@@ -64,8 +63,6 @@ def caption_image(
     beam_size:       int  = 5,
     max_new_tokens:  int  = 50,
     length_penalty:  float = 1.0,
-    vit_model:       str  = "google/vit-base-patch16-224",
-    gpt2_model:      str  = "gpt2",
     device:          str  = None,
 ) -> str:
     """
@@ -78,8 +75,6 @@ def caption_image(
         beam_size       : number of beams (used only when mode='beam')
         max_new_tokens  : maximum caption length in tokens
         length_penalty  : exponent applied to sequence length in beam scoring
-        vit_model       : HuggingFace ViT model name
-        gpt2_model      : HuggingFace GPT-2 model name
         device          : 'cuda', 'cpu', or None (auto-detect)
 
     Returns:
@@ -89,11 +84,11 @@ def caption_image(
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Tokeniser
-    tokenizer = GPT2Tokenizer.from_pretrained(gpt2_model)
+    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
 
     # Model
-    model = load_model(checkpoint_path, vit_model, gpt2_model, device)
+    model = load_model(checkpoint_path, device)
 
     # Image
     pixel_values = preprocess_image(image_path).to(device)
@@ -145,10 +140,6 @@ def parse_args():
         help="Length penalty exponent for beam scoring (default: 1.0)",
     )
     parser.add_argument(
-        "--gpt2_model", type=str, default="gpt2",
-        help="GPT-2 variant used at training time (default: gpt2)",
-    )
-    parser.add_argument(
         "--device", type=str, default=None,
         help="Device override: 'cuda' or 'cpu' (default: auto-detect)",
     )
@@ -169,7 +160,6 @@ if __name__ == "__main__":
         beam_size=args.beam_size,
         max_new_tokens=args.max_tokens,
         length_penalty=args.length_penalty,
-        gpt2_model=args.gpt2_model,
         device=args.device,
     )
 
